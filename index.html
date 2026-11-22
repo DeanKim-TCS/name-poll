@@ -124,7 +124,8 @@ const SUF="(제안)";
 let custom=[];
 const NAMES=C.map(c=>c[0]);
 const MARK="[둘째 이름 투표]";
-let picks=[], db=null, me=null, dbVotes={};
+const API="https://firestore.googleapis.com/v1/projects/name-poll-8366e/databases/(default)/documents/votes";
+let picks=[], dbVotes={}, live=false;
 const $=id=>document.getElementById(id);
 function given(n){return n.startsWith("김")&&n.length>=3?n.slice(1):n}
 function esc(t){return String(t).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
@@ -176,15 +177,21 @@ async function submit(){
   if(!picks.length)return;
   const text=voteText(who);
   let saved=false;
-  if(db&&me){
-    try{await db.collection("votes").doc(me).set({name:who,picks:picks.map(label),at:Date.now()});saved=true}catch(e){}
-  }
+  $("go").disabled=true;say("저장하는 중…");
+  try{
+    const id=encodeURIComponent(who.replace(/[\/.]/g,"_"));
+    const body={fields:{name:{stringValue:who},picks:{arrayValue:{values:picks.map(label).map(p=>({stringValue:p}))}},at:{timestampValue:new Date().toISOString()}}};
+    const r=await fetch(API+"/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    saved=r.ok;
+  }catch(e){}
+  $("go").disabled=false;
+  if(saved){try{localStorage.setItem("pollWho",who)}catch(e){};load()}
   let copied=false;
   try{await navigator.clipboard.writeText(text);copied=true}catch(e){}
   const out=$("out");out.style.display="block";
-  out.textContent=(saved?"✅ 투표가 저장됐어요.\n\n":"")+
-    (copied?"📋 아래 문구가 복사됐어요. 단톡방에 붙여 넣어 주세요.\n\n":"📋 아래 문구를 길게 눌러 복사해 단톡방에 붙여 넣어 주세요.\n\n")+text;
-  say(saved?"고마워요! 결과 보기에서 지금까지 결과를 볼 수 있어요.":"고마워요! 단톡방에 붙여 넣으면 집계돼요.");
+  out.textContent=saved?"✅ 투표가 저장됐어요. 다시 투표하면 마지막 것만 세요.\n\n(단톡방에 알리고 싶으면 아래 문구를 붙여 넣어도 돼요.)\n"+text:
+    "⚠️ 저장이 안 됐어요. 아래 문구를 단톡방에 붙여 넣어 주세요.\n\n"+(copied?"(문구가 복사됐어요)\n":"(길게 눌러 복사해 주세요)\n")+text;
+  say(saved?"고마워요! 결과 보기에서 지금까지 결과를 볼 수 있어요.":"저장 실패 — 단톡방에 붙여 넣으면 집계돼요.");
   out.scrollIntoView({behavior:"smooth",block:"center"});
 }
 
@@ -233,23 +240,22 @@ function tab(v){
 $("tVote").onclick=()=>tab(true);$("tRes").onclick=()=>tab(false);
 renderList();
 
-(async()=>{
-  if(typeof claude==="undefined"||!claude.use){$("liveState").textContent="카톡으로 받은 투표 문구를 아래에 붙여 넣으면 자동으로 집계돼요.";return}
-  let timer=setTimeout(()=>{$("liveState").textContent="실시간 집계는 쓸 수 없어요. 카톡으로 받은 결과를 아래에 붙여 넣어 세어 주세요."},10000);
+async function load(){
   try{
-    const [d,u]=await Promise.all([claude.use("db"),claude.use("user")]);
-    if(!d){clearTimeout(timer);$("liveState").textContent="실시간 집계는 쓸 수 없어요. 카톡으로 받은 결과를 아래에 붙여 넣어 세어 주세요.";return}
-    db=d; try{me=u?await u.id():null}catch(e){me=null}
-    db.collection("votes").onSnapshot(snap=>{
-      clearTimeout(timer);
-      dbVotes={};
-      (snap.docs||snap).forEach(doc=>{const v=typeof doc.data==="function"?doc.data():doc;dbVotes[doc.id||Math.random()]=v});
-      $("liveState").innerHTML=`<span class="live"></span>실시간 집계 중 · 이 페이지에서 투표한 사람은 자동으로 세져요.`;
-      try{const mine=me&&dbVotes[me];if(mine&&!$("who").value)$("who").value=mine.name||""}catch(e){}
-      tally();
-    },err=>{clearTimeout(timer);$("liveState").textContent="실시간 집계를 불러오지 못했어요. 카톡으로 받은 결과를 아래에 붙여 넣어 세어 주세요."});
-  }catch(e){clearTimeout(timer);$("liveState").textContent="실시간 집계는 쓸 수 없어요. 카톡으로 받은 결과를 아래에 붙여 넣어 세어 주세요."}
-})();
+    const r=await fetch(API+"?pageSize=300");
+    if(!r.ok)throw 0;
+    const j=await r.json();
+    dbVotes={};(j.documents||[]).forEach(d=>{const f=d.fields||{};const n=f.name&&f.name.stringValue;if(!n)return;
+      dbVotes[n]={name:n,picks:((f.picks&&f.picks.arrayValue&&f.picks.arrayValue.values)||[]).map(v=>v.stringValue).filter(Boolean)}});
+    live=true;
+    $("liveState").innerHTML=`<span class="live"></span>실시간 집계 중 · 지금까지 ${Object.keys(dbVotes).length}명 투표 · 이 페이지에서 투표하면 자동으로 저장·집계돼요.`;
+  }catch(e){
+    if(!live)$("liveState").textContent="집계를 불러오지 못했어요. 잠시 뒤 다시 열거나, 카톡으로 받은 결과를 아래에 붙여 넣어 세어 주세요.";
+  }
+  tally();
+}
+try{const w=localStorage.getItem("pollWho");if(w)$("who").value=w}catch(e){}
+load();setInterval(()=>{if(!document.hidden)load()},20000);
 </script>
 </body>
 </html>
